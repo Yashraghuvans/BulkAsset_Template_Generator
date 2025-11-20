@@ -105,6 +105,13 @@ public class DailyOverdueDigest implements Schedulable {
      * Send summary digest email to maintenance manager
      */
     private static void sendSummaryDigest(List<Asset> overdueAssets) {
+        // Get maintenance team email from custom metadata
+        String maintenanceEmail = getMaintenanceTeamEmail();
+        if (String.isBlank(maintenanceEmail)) {
+            System.debug('No maintenance team email configured. Skipping summary digest.');
+            return;
+        }
+        
         // Count critical assets
         Integer criticalCount = 0;
         for (Asset a : overdueAssets) {
@@ -118,7 +125,7 @@ public class DailyOverdueDigest implements Schedulable {
         
         // Send email
         Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
-        email.setToAddresses(new List<String>{'maintenance-manager@company.com'});
+        email.setToAddresses(new List<String>{maintenanceEmail});
         email.setSubject('Daily Overdue Maintenance Digest - ' + Date.today().format());
         email.setHtmlBody(emailBody);
         
@@ -130,10 +137,35 @@ public class DailyOverdueDigest implements Schedulable {
         
         try {
             Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{email});
-            System.debug('Daily overdue digest sent successfully.');
+            System.debug('Daily overdue digest sent successfully to: ' + maintenanceEmail);
         } catch (Exception e) {
             System.debug('Error sending daily digest: ' + e.getMessage());
         }
+    }
+    
+    /**
+     * Get maintenance team email from Custom Metadata Type
+     * Falls back gracefully if not configured
+     */
+    private static String getMaintenanceTeamEmail() {
+        try {
+            List<Asset_Email_Config__mdt> configs = [
+                SELECT Maintenance_Team_Email__c
+                FROM Asset_Email_Config__mdt
+                WHERE DeveloperName = 'Default_Config'
+                LIMIT 1
+            ];
+            
+            if (!configs.isEmpty() && String.isNotBlank(configs[0].Maintenance_Team_Email__c)) {
+                return configs[0].Maintenance_Team_Email__c;
+            }
+        } catch (Exception e) {
+            System.debug('Error retrieving maintenance team email from metadata: ' + e.getMessage());
+        }
+        
+        // Fallback: log error and return null
+        System.debug(LoggingLevel.ERROR, 'Maintenance team email not configured in Asset_Email_Config__mdt');
+        return null;
     }
     
     /**

@@ -37,7 +37,7 @@ public with sharing class AssetTemplateService {
             }
             
             // Step 4: Get first account for Asset records (query once outside loop)
-            List<Account> accounts = [SELECT Id FROM Account LIMIT 1];
+            List<Account> accounts = [SELECT Id FROM Account WITH USER_MODE LIMIT 1];
             Id accountId = !accounts.isEmpty() ? accounts[0].Id : null;
             
             // Step 5: Generate assets in bulk
@@ -48,12 +48,36 @@ public with sharing class AssetTemplateService {
                 assetsToInsert.add(newAsset);
             }
             
-            // Step 6: Bulk insert all assets
-            insert assetsToInsert;
+            // Step 6: Check create permission and bulk insert all assets
+            if (!Schema.sObjectType.Asset.isCreateable()) {
+                throw new AuraHandledException('You do not have permission to create Assets.');
+            }
             
-            // Step 7: Return list of created Asset IDs
+            SObjectAccessDecision decision = Security.stripInaccessible(
+                AccessType.CREATABLE, assetsToInsert);
+            insert decision.getRecords();
+            
+            // Step 7: Create MaintenancePlans for each asset
+            List<MaintenancePlan> maintenancePlansToInsert = new List<MaintenancePlan>();
+            for (Asset a : (List<Asset>)decision.getRecords()) {
+                MaintenancePlan mp = createMaintenancePlanForAsset(a, template);
+                if (mp != null) {
+                    maintenancePlansToInsert.add(mp);
+                }
+            }
+            
+            // Step 8: Insert MaintenancePlans if any
+            if (!maintenancePlansToInsert.isEmpty()) {
+                if (Schema.sObjectType.MaintenancePlan.isCreateable()) {
+                    SObjectAccessDecision mpDecision = Security.stripInaccessible(
+                        AccessType.CREATABLE, maintenancePlansToInsert);
+                    insert mpDecision.getRecords();
+                }
+            }
+            
+            // Step 9: Return list of created Asset IDs
             List<Id> assetIds = new List<Id>();
-            for (Asset a : assetsToInsert) {
+            for (SObject a : decision.getRecords()) {
                 assetIds.add(a.Id);
             }
             
@@ -77,6 +101,7 @@ public with sharing class AssetTemplateService {
                 SELECT Id, Name, Asset_Type__c, Manufacturer__c, Model__c, Description__c, Is_Active__c
                 FROM AssetTemplate__c
                 WHERE Is_Active__c = true
+                WITH USER_MODE
                 ORDER BY Name ASC
                 LIMIT 200
             ];
@@ -122,13 +147,24 @@ public with sharing class AssetTemplateService {
      * Queries template with all custom fields
      */
     private static AssetTemplate__c queryTemplate(Id templateId) {
-        List<AssetTemplate__c> templates = [
-            SELECT Id, Name, Description__c, Asset_Type__c, Manufacturer__c, 
-                   Model__c, Default_Status__c, Is_Active__c
-            FROM AssetTemplate__c
-            WHERE Id = :templateId
-            LIMIT 1
-        ];
+        String assetTypeField = NamespaceUtil.getFieldName('Asset_Type__c');
+        String manufacturerField = NamespaceUtil.getFieldName('Manufacturer__c');
+        String modelField = NamespaceUtil.getFieldName('Model__c');
+        String descriptionField = NamespaceUtil.getFieldName('Description__c');
+        String defaultStatusField = NamespaceUtil.getFieldName('Default_Status__c');
+        String isActiveField = NamespaceUtil.getFieldName('Is_Active__c');
+        String maintenanceIntervalField = NamespaceUtil.getFieldName('Maintenance_Interval_Days__c');
+        
+        String query = 'SELECT Id, Name, ' + descriptionField + ', ' + assetTypeField + ', ' + 
+                       manufacturerField + ', ' + modelField + ', ' + defaultStatusField + ', ' + 
+                       isActiveField + ', ' + maintenanceIntervalField + 
+                       ' FROM AssetTemplate__c WHERE Id = :templateId WITH USER_MODE LIMIT 1';
+        
+        List<AssetTemplate__c> templates = Database.queryWithBinds(
+            query, 
+            new Map<String, Object>{'templateId' => templateId}, 
+            AccessLevel.USER_MODE
+        );
         
         if (templates.isEmpty()) {
             throw new AuraHandledException('Template not found with ID: ' + templateId);
@@ -145,29 +181,60 @@ public with sharing class AssetTemplateService {
     private static Asset createAssetFromTemplate(AssetTemplate__c template, String sitePrefix, Integer sequenceNum, Id accountId) {
         Asset newAsset = new Asset();
         
+        String assetTypeField = NamespaceUtil.getFieldName('Asset_Type__c');
+        String assetTemplateField = NamespaceUtil.getFieldName('Asset_Template__c');
+        String createdFromTemplateField = NamespaceUtil.getFieldName('Created_From_Template__c');
+        String templateAppliedDateField = NamespaceUtil.getFieldName('Template_Applied_Date__c');
+        String descriptionField = NamespaceUtil.getFieldName('Description__c');
+        String defaultStatusField = NamespaceUtil.getFieldName('Default_Status__c');
+        
         // Generate asset name with format: SITE-A-VEHICLE-0001
-        String assetType = template.Asset_Type__c != null ? template.Asset_Type__c.toUpperCase() : 'ASSET';
+        String assetType = template.get(assetTypeField) != null ? 
+                          ((String)template.get(assetTypeField)).toUpperCase() : 'ASSET';
         String formattedNumber = String.valueOf(sequenceNum).leftPad(4, '0');
         newAsset.Name = sitePrefix + '-' + assetType + '-' + formattedNumber;
         
         // Copy template fields to asset
-        newAsset.Description = template.Description__c;
+        newAsset.Description = (String)template.get(descriptionField);
         
         // Set account if available
         if (accountId != null) {
             newAsset.AccountId = accountId;
         }
         
-        // Set custom fields
-        newAsset.Asset_Template__c = template.Id;
-        newAsset.Created_From_Template__c = true;
-        newAsset.Template_Applied_Date__c = System.now();
+        // Set custom fields using namespace-aware field names
+        newAsset.put(assetTemplateField, template.Id);
+        newAsset.put(createdFromTemplateField, true);
+        newAsset.put(templateAppliedDateField, System.now());
         
         // Set status from template default
-        if (template.Default_Status__c != null) {
-            newAsset.Status = template.Default_Status__c;
+        if (template.get(defaultStatusField) != null) {
+            newAsset.Status = (String)template.get(defaultStatusField);
         }
         
         return newAsset;
+    }
+    
+    /**
+     * Creates a MaintenancePlan for an Asset based on template configuration
+     */
+    private static MaintenancePlan createMaintenancePlanForAsset(Asset asset, AssetTemplate__c template) {
+        String maintenanceIntervalField = NamespaceUtil.getFieldName('Maintenance_Interval_Days__c');
+        Decimal maintenanceInterval = (Decimal)template.get(maintenanceIntervalField);
+        
+        // Only create maintenance plan if template has maintenance interval configured
+        if (maintenanceInterval == null || maintenanceInterval <= 0) {
+            return null;
+        }
+        
+        MaintenancePlan mp = new MaintenancePlan();
+        mp.AssetId = asset.Id;
+        mp.MaintenancePlanTitle = 'Maintenance Plan - ' + asset.Name;
+        mp.StartDate = Date.today();
+        mp.Frequency = 'Days';
+        mp.FrequencyType = 'Recurring';
+        mp.MaintenancePlanDuration = Integer.valueOf(maintenanceInterval);
+        
+        return mp;
     }
 }

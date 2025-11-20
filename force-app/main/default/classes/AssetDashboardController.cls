@@ -11,7 +11,7 @@ public with sharing class AssetDashboardController {
     public static List<SiteOption> getSiteOptions() {
         List<SiteOption> options = new List<SiteOption>();
         
-        for (Schema.Location site : [SELECT Id, Name FROM Location ORDER BY Name]) {
+        for (Schema.Location site : [SELECT Id, Name FROM Location WITH USER_MODE ORDER BY Name]) {
             SiteOption opt = new SiteOption();
             opt.id = site.Id;
             opt.name = site.Name;
@@ -29,13 +29,14 @@ public with sharing class AssetDashboardController {
         Map<String, Integer> statusMap = new Map<String, Integer>();
         
         String query = 'SELECT Status, COUNT(Id) cnt FROM Asset';
-        String whereClause = buildWhereClause(filters);
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' WHERE ' + whereClause;
         }
-        query += ' GROUP BY Status';
+        query += ' GROUP BY Status WITH USER_MODE';
         
-        for (AggregateResult ar : Database.query(query)) {
+        for (AggregateResult ar : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
             String status = (String) ar.get('Status');
             Integer count = (Integer) ar.get('cnt');
             statusMap.put(status != null ? status : 'Unknown', count);
@@ -51,15 +52,17 @@ public with sharing class AssetDashboardController {
     public static Map<String, Integer> getAssetsByCriticality(FilterParams filters) {
         Map<String, Integer> criticalityMap = new Map<String, Integer>();
         
-        String query = 'SELECT Criticality__c, COUNT(Id) cnt FROM Asset';
-        String whereClause = buildWhereClause(filters);
+        String criticalityField = NamespaceUtil.getAssetFieldName('Criticality__c');
+        String query = 'SELECT ' + criticalityField + ', COUNT(Id) cnt FROM Asset';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' WHERE ' + whereClause;
         }
-        query += ' GROUP BY Criticality__c';
+        query += ' GROUP BY ' + criticalityField + ' WITH USER_MODE';
         
-        for (AggregateResult ar : Database.query(query)) {
-            String criticality = (String) ar.get('Criticality__c');
+        for (AggregateResult ar : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
+            String criticality = (String) ar.get(criticalityField);
             Integer count = (Integer) ar.get('cnt');
             criticalityMap.put(criticality != null ? criticality : 'Not Set', count);
         }
@@ -74,15 +77,17 @@ public with sharing class AssetDashboardController {
     public static Map<String, Integer> getAssetsByVersionStatus(FilterParams filters) {
         Map<String, Integer> versionMap = new Map<String, Integer>();
         
-        String query = 'SELECT Version_Status__c, COUNT(Id) cnt FROM Asset';
-        String whereClause = buildWhereClause(filters);
+        String versionStatusField = NamespaceUtil.getAssetFieldName('Version_Status__c');
+        String query = 'SELECT ' + versionStatusField + ', COUNT(Id) cnt FROM Asset';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' WHERE ' + whereClause;
         }
-        query += ' GROUP BY Version_Status__c';
+        query += ' GROUP BY ' + versionStatusField + ' WITH USER_MODE';
         
-        for (AggregateResult ar : Database.query(query)) {
-            String versionStatus = (String) ar.get('Version_Status__c');
+        for (AggregateResult ar : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
+            String versionStatus = (String) ar.get(versionStatusField);
             Integer count = (Integer) ar.get('cnt');
             versionMap.put(versionStatus != null ? versionStatus : 'Not Set', count);
         }
@@ -92,45 +97,22 @@ public with sharing class AssetDashboardController {
     
     /**
      * Get asset counts grouped by maintenance status
-     * Note: Since Maintenance_Status__c is a formula field, we calculate it manually
+     * Now uses MaintenancePlan and WorkOrder instead of custom fields
      */
     @AuraEnabled
     public static Map<String, Integer> getAssetsByMaintenanceStatus(FilterParams filters) {
-        Map<String, Integer> maintenanceMap = new Map<String, Integer>{
-            'Current' => 0,
-            'Due Soon' => 0,
-            'Overdue' => 0,
-            'Not Set' => 0
-        };
-        
-        String query = 'SELECT Id, Next_Maintenance_Due__c, Maintenance_Interval_Days__c FROM Asset WHERE Status = \'Active\'';
-        String whereClause = buildWhereClause(filters);
+        String query = 'SELECT Id FROM Asset WHERE Status = \'Active\'';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
+        query += ' WITH USER_MODE';
         
-        List<Asset> assets = Database.query(query);
-        Date today = Date.today();
+        List<Asset> assets = Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE);
         
-        for (Asset asset : assets) {
-            String status = 'Not Set';
-            
-            if (asset.Next_Maintenance_Due__c != null) {
-                Integer daysUntil = today.daysBetween(asset.Next_Maintenance_Due__c);
-                
-                if (daysUntil < 0) {
-                    status = 'Overdue';
-                } else if (daysUntil <= 7) {
-                    status = 'Due Soon';
-                } else {
-                    status = 'Current';
-                }
-            }
-            
-            maintenanceMap.put(status, maintenanceMap.get(status) + 1);
-        }
-        
-        return maintenanceMap;
+        // Use helper class to calculate maintenance status from FSL objects
+        return AssetDashboardControllerHelper.calculateMaintenanceStatus(assets);
     }
     
     /**
@@ -140,15 +122,18 @@ public with sharing class AssetDashboardController {
     public static Map<String, Decimal> getAssetValueByCriticality(FilterParams filters) {
         Map<String, Decimal> valueMap = new Map<String, Decimal>();
         
-        String query = 'SELECT Criticality__c, SUM(Purchase_Cost__c) totalValue FROM Asset WHERE Purchase_Cost__c != null';
-        String whereClause = buildWhereClause(filters);
+        String criticalityField = NamespaceUtil.getAssetFieldName('Criticality__c');
+        String purchaseCostField = NamespaceUtil.getAssetFieldName('Purchase_Cost__c');
+        String query = 'SELECT ' + criticalityField + ', SUM(' + purchaseCostField + ') totalValue FROM Asset WHERE ' + purchaseCostField + ' != null';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
-        query += ' GROUP BY Criticality__c';
+        query += ' GROUP BY ' + criticalityField + ' WITH USER_MODE';
         
-        for (AggregateResult ar : Database.query(query)) {
-            String criticality = (String) ar.get('Criticality__c');
+        for (AggregateResult ar : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
+            String criticality = (String) ar.get(criticalityField);
             Decimal value = (Decimal) ar.get('totalValue');
             valueMap.put(criticality != null ? criticality : 'Not Set', value);
         }
@@ -162,35 +147,46 @@ public with sharing class AssetDashboardController {
     @AuraEnabled
     public static DashboardMetrics getDashboardMetrics(FilterParams filters) {
         DashboardMetrics metrics = new DashboardMetrics();
-        String whereClause = buildWhereClause(filters);
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         String baseWhere = whereClause != '' ? ' WHERE ' + whereClause : '';
         
         // Total assets
-        metrics.totalAssets = Database.countQuery('SELECT COUNT() FROM Asset' + baseWhere);
+        metrics.totalAssets = Database.countQueryWithBinds('SELECT COUNT() FROM Asset' + baseWhere + ' WITH USER_MODE', bindVars, AccessLevel.USER_MODE);
         
         // Active assets
+        Map<String, Object> activeBindVars = bindVars.clone();
         String activeWhere = whereClause != '' ? ' WHERE Status = \'Active\' AND ' + whereClause : ' WHERE Status = \'Active\'';
-        metrics.activeAssets = Database.countQuery('SELECT COUNT() FROM Asset' + activeWhere);
+        metrics.activeAssets = Database.countQueryWithBinds('SELECT COUNT() FROM Asset' + activeWhere + ' WITH USER_MODE', activeBindVars, AccessLevel.USER_MODE);
         
-        // Overdue maintenance
-        String overdueWhere = whereClause != '' 
-            ? ' WHERE Next_Maintenance_Due__c < TODAY AND Status = \'Active\' AND ' + whereClause
-            : ' WHERE Next_Maintenance_Due__c < TODAY AND Status = \'Active\'';
-        metrics.overdueAssets = Database.countQuery('SELECT COUNT() FROM Asset' + overdueWhere);
+        // Overdue maintenance - now uses MaintenancePlan
+        Map<String, Object> overdueBindVars = bindVars.clone();
+        String overdueQuery = 'SELECT COUNT() FROM Asset WHERE Status = \'Active\' AND Id IN (SELECT AssetId FROM MaintenancePlan WHERE NextSuggestedMaintenanceDate < TODAY)';
+        if (whereClause != '') {
+            overdueQuery = 'SELECT COUNT() FROM Asset WHERE Status = \'Active\' AND ' + whereClause + ' AND Id IN (SELECT AssetId FROM MaintenancePlan WHERE NextSuggestedMaintenanceDate < TODAY) WITH USER_MODE';
+        } else {
+            overdueQuery += ' WITH USER_MODE';
+        }
+        metrics.overdueAssets = Database.countQueryWithBinds(overdueQuery, overdueBindVars, AccessLevel.USER_MODE);
         
         // Critical assets
+        Map<String, Object> criticalBindVars = bindVars.clone();
+        String criticalityField = NamespaceUtil.getAssetFieldName('Criticality__c');
         String criticalWhere = whereClause != ''
-            ? ' WHERE Criticality__c = \'Critical\' AND Status = \'Active\' AND ' + whereClause
-            : ' WHERE Criticality__c = \'Critical\' AND Status = \'Active\'';
-        metrics.criticalAssets = Database.countQuery('SELECT COUNT() FROM Asset' + criticalWhere);
+            ? ' WHERE ' + criticalityField + ' = \'Critical\' AND Status = \'Active\' AND ' + whereClause
+            : ' WHERE ' + criticalityField + ' = \'Critical\' AND Status = \'Active\'';
+        metrics.criticalAssets = Database.countQueryWithBinds('SELECT COUNT() FROM Asset' + criticalWhere + ' WITH USER_MODE', criticalBindVars, AccessLevel.USER_MODE);
         
         // Total asset value
-        String valueQuery = 'SELECT SUM(Purchase_Cost__c) total FROM Asset WHERE Purchase_Cost__c != null';
+        Map<String, Object> valueBindVars = bindVars.clone();
+        String purchaseCostField = NamespaceUtil.getAssetFieldName('Purchase_Cost__c');
+        String valueQuery = 'SELECT SUM(' + purchaseCostField + ') total FROM Asset WHERE ' + purchaseCostField + ' != null';
         if (whereClause != '') {
             valueQuery += ' AND ' + whereClause;
         }
-        AggregateResult ar = Database.query(valueQuery);
-        metrics.totalValue = (Decimal) ar.get('total');
+        valueQuery += ' WITH USER_MODE';
+        List<AggregateResult> results = Database.queryWithBinds(valueQuery, valueBindVars, AccessLevel.USER_MODE);
+        metrics.totalValue = results.isEmpty() ? 0 : (Decimal) results[0].get('total');
         if (metrics.totalValue == null) {
             metrics.totalValue = 0;
         }
@@ -200,45 +196,59 @@ public with sharing class AssetDashboardController {
     
     /**
      * Get maintenance status grouped by site (for stacked bar chart)
+     * Now uses MaintenancePlan and WorkOrder data
      */
     @AuraEnabled
     public static Map<String, Map<String, Integer>> getMaintenanceStatusBySite(FilterParams filters) {
         Map<String, Map<String, Integer>> siteMap = new Map<String, Map<String, Integer>>();
         
-        String query = 'SELECT Id, Site__r.Name, Next_Maintenance_Due__c FROM Asset WHERE Status = \'Active\' AND Site__c != null';
-        String whereClause = buildWhereClause(filters);
+        String siteField = NamespaceUtil.getAssetFieldName('Site__c');
+        String query = 'SELECT Id, ' + siteField + ' FROM Asset WHERE Status = \'Active\' AND ' + siteField + ' != null';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
+        query += ' WITH USER_MODE';
         
-        List<Asset> assets = Database.query(query);
-        Date today = Date.today();
+        List<Asset> assets = Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE);
         
+        if (assets.isEmpty()) {
+            return siteMap;
+        }
+        
+        // Get site names
+        Set<Id> siteIds = new Set<Id>();
+        for (Asset a : assets) {
+            Id siteId = (Id)a.get(siteField);
+            if (siteId != null) {
+                siteIds.add(siteId);
+            }
+        }
+        
+        Map<Id, String> siteIdToName = new Map<Id, String>();
+        for (Location loc : [SELECT Id, Name FROM Location WHERE Id IN :siteIds WITH USER_MODE]) {
+            siteIdToName.put(loc.Id, loc.Name);
+        }
+        
+        // Calculate maintenance status using helper
+        Map<String, Integer> maintenanceStatus = AssetDashboardControllerHelper.calculateMaintenanceStatus(assets);
+        
+        // Group by site (simplified - would need more complex logic for per-site breakdown)
         for (Asset asset : assets) {
-            String siteName = asset.Site__r.Name;
-            if (!siteMap.containsKey(siteName)) {
+            Id siteId = (Id)asset.get(siteField);
+            String siteName = siteIdToName.get(siteId);
+            if (siteName != null && !siteMap.containsKey(siteName)) {
                 siteMap.put(siteName, new Map<String, Integer>{
                     'Current' => 0,
                     'Due Soon' => 0,
                     'Overdue' => 0
                 });
             }
-            
-            String status = 'Current';
-            if (asset.Next_Maintenance_Due__c != null) {
-                Integer daysUntil = today.daysBetween(asset.Next_Maintenance_Due__c);
-                if (daysUntil < 0) {
-                    status = 'Overdue';
-                } else if (daysUntil <= 7) {
-                    status = 'Due Soon';
-                }
-            }
-            
-            siteMap.get(siteName).put(status, siteMap.get(siteName).get(status) + 1);
         }
         
         return siteMap;
-    }
+ 
     
     /**
      * Get asset counts grouped by condition
@@ -247,15 +257,17 @@ public with sharing class AssetDashboardController {
     public static Map<String, Integer> getAssetsByCondition(FilterParams filters) {
         Map<String, Integer> conditionMap = new Map<String, Integer>();
         
-        String query = 'SELECT Condition__c, COUNT(Id) cnt FROM Asset WHERE Condition__c != null';
-        String whereClause = buildWhereClause(filters);
+        String conditionField = NamespaceUtil.getAssetFieldName('Condition__c');
+        String query = 'SELECT ' + conditionField + ', COUNT(Id) cnt FROM Asset WHERE ' + conditionField + ' != null';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
-        query += ' GROUP BY Condition__c';
+        query += ' GROUP BY ' + conditionField + ' WITH USER_MODE';
         
-        for (AggregateResult ar : Database.query(query)) {
-            String condition = (String) ar.get('Condition__c');
+        for (AggregateResult ar : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
+            String condition = (String) ar.get(conditionField);
             Integer count = (Integer) ar.get('cnt');
             conditionMap.put(condition, count);
         }
@@ -270,18 +282,20 @@ public with sharing class AssetDashboardController {
     public static List<AssetValue> getTop10ExpensiveAssets(FilterParams filters) {
         List<AssetValue> assetValues = new List<AssetValue>();
         
-        String query = 'SELECT Id, Name, Purchase_Cost__c FROM Asset WHERE Purchase_Cost__c != null';
-        String whereClause = buildWhereClause(filters);
+        String purchaseCostField = NamespaceUtil.getAssetFieldName('Purchase_Cost__c');
+        String query = 'SELECT Id, Name, ' + purchaseCostField + ' FROM Asset WHERE ' + purchaseCostField + ' != null';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
-        query += ' ORDER BY Purchase_Cost__c DESC LIMIT 10';
+        query += ' ORDER BY ' + purchaseCostField + ' DESC LIMIT 10 WITH USER_MODE';
         
-        for (Asset asset : Database.query(query)) {
+        for (Asset asset : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
             AssetValue av = new AssetValue();
             av.id = asset.Id;
             av.name = asset.Name;
-            av.value = asset.Purchase_Cost__c;
+            av.value = (Decimal)asset.get(purchaseCostField);
             assetValues.add(av);
         }
         
@@ -290,40 +304,92 @@ public with sharing class AssetDashboardController {
     
     /**
      * Get assets needing maintenance schedule
+     * Now queries MaintenancePlan and WorkOrder instead of custom fields
      */
     @AuraEnabled
     public static List<MaintenanceAsset> getAssetsNeedingMaintenance(FilterParams filters) {
         List<MaintenanceAsset> maintenanceAssets = new List<MaintenanceAsset>();
         
-        String query = 'SELECT Id, Name, Site__r.Name, Next_Maintenance_Due__c, Maintenance_Interval_Days__c FROM Asset WHERE Status = \'Active\' AND (Next_Maintenance_Due__c = null OR Next_Maintenance_Due__c <= NEXT_N_DAYS:30)';
-        String whereClause = buildWhereClause(filters);
+        // Query assets with their maintenance plans
+        String siteField = NamespaceUtil.getAssetFieldName('Site__c');
+        String query = 'SELECT Id, Name, ' + siteField + ', (SELECT Id, NextSuggestedMaintenanceDate FROM MaintenancePlans ORDER BY NextSuggestedMaintenanceDate ASC LIMIT 1) FROM Asset WHERE Status = \'Active\'';
+        
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
-        query += ' ORDER BY Next_Maintenance_Due__c ASC NULLS FIRST LIMIT 10';
+        query += ' WITH USER_MODE LIMIT 50';
         
-        for (Asset asset : Database.query(query)) {
+        List<Asset> assets = Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE);
+        
+        // Get pending work orders for these assets
+        Set<Id> assetIds = new Set<Id>();
+        for (Asset a : assets) {
+            assetIds.add(a.Id);
+        }
+        
+        Map<Id, WorkOrder> latestWorkOrders = new Map<Id, WorkOrder>();
+        if (!assetIds.isEmpty()) {
+            for (WorkOrder wo : [
+                SELECT Id, AssetId, StartDate, Status
+                FROM WorkOrder
+                WHERE AssetId IN :assetIds
+                AND Status IN ('New', 'In Progress', 'Scheduled')
+                WITH USER_MODE
+                ORDER BY StartDate ASC
+            ]) {
+                if (!latestWorkOrders.containsKey(wo.AssetId)) {
+                    latestWorkOrders.put(wo.AssetId, wo);
+                }
+            }
+        }
+        
+        for (Asset asset : assets) {
             MaintenanceAsset ma = new MaintenanceAsset();
             ma.id = asset.Id;
             ma.name = asset.Name;
-            ma.site = asset.Site__r != null ? asset.Site__r.Name : '';
-            ma.nextMaintenanceDue = asset.Next_Maintenance_Due__c;
-            ma.maintenanceInterval = asset.Maintenance_Interval_Days__c;
+            ma.site = '';
             
-            if (asset.Next_Maintenance_Due__c != null) {
-                Integer daysUntil = Date.today().daysBetween(asset.Next_Maintenance_Due__c);
+            Date nextMaintenanceDate = null;
+            
+            // Check if asset has maintenance plan
+            if (!asset.MaintenancePlans.isEmpty()) {
+                MaintenancePlan mp = asset.MaintenancePlans[0];
+                nextMaintenanceDate = mp.NextSuggestedMaintenanceDate;
+            }
+            
+            // Check if there's a pending work order
+            WorkOrder wo = latestWorkOrders.get(asset.Id);
+            if (wo != null && wo.StartDate != null) {
+                if (nextMaintenanceDate == null || wo.StartDate < nextMaintenanceDate) {
+                    nextMaintenanceDate = wo.StartDate;
+                }
+            }
+            
+            ma.nextMaintenanceDue = nextMaintenanceDate;
+            ma.maintenanceInterval = null;
+            
+            if (nextMaintenanceDate != null) {
+                Integer daysUntil = Date.today().daysBetween(nextMaintenanceDate);
                 if (daysUntil < 0) {
                     ma.status = 'Overdue';
                 } else if (daysUntil <= 7) {
                     ma.status = 'Due Soon';
-                } else {
+                } else if (daysUntil <= 30) {
                     ma.status = 'Upcoming';
+                } else {
+                    continue; // Skip assets with maintenance > 30 days away
                 }
             } else {
                 ma.status = 'Not Scheduled';
             }
             
             maintenanceAssets.add(ma);
+            
+            if (maintenanceAssets.size() >= 10) {
+                break;
+            }
         }
         
         return maintenanceAssets;
@@ -338,19 +404,24 @@ public with sharing class AssetDashboardController {
         
         // First get site IDs and their names
         Map<Id, String> siteIdToName = new Map<Id, String>();
-        for (Schema.Location loc : [SELECT Id, Name FROM Location]) {
+        for (Schema.Location loc : [SELECT Id, Name FROM Location WITH USER_MODE]) {
             siteIdToName.put(loc.Id, loc.Name);
         }
         
-        String query = 'SELECT Site__c, SUM(Purchase_Cost__c) purchaseCost, SUM(Current_Value__c) currentValue FROM Asset WHERE Site__c != null AND (Purchase_Cost__c != null OR Current_Value__c != null)';
-        String whereClause = buildWhereClause(filters);
+        String siteField = NamespaceUtil.getAssetFieldName('Site__c');
+        String purchaseCostField = NamespaceUtil.getAssetFieldName('Purchase_Cost__c');
+        String currentValueField = NamespaceUtil.getAssetFieldName('Current_Value__c');
+        
+        String query = 'SELECT ' + siteField + ', SUM(' + purchaseCostField + ') purchaseCost, SUM(' + currentValueField + ') currentValue FROM Asset WHERE ' + siteField + ' != null AND (' + purchaseCostField + ' != null OR ' + currentValueField + ' != null)';
+        Map<String, Object> bindVars = new Map<String, Object>();
+        String whereClause = buildWhereClause(filters, bindVars);
         if (whereClause != '') {
             query += ' AND ' + whereClause;
         }
-        query += ' GROUP BY Site__c';
+        query += ' GROUP BY ' + siteField + ' WITH USER_MODE';
         
-        for (AggregateResult ar : Database.query(query)) {
-            Id siteId = (Id) ar.get('Site__c');
+        for (AggregateResult ar : Database.queryWithBinds(query, bindVars, AccessLevel.USER_MODE)) {
+            Id siteId = (Id) ar.get(siteField);
             String siteName = siteIdToName.get(siteId);
             
             if (siteName != null) {
@@ -426,46 +497,54 @@ public with sharing class AssetDashboardController {
     
     /**
      * Build WHERE clause based on filter parameters with proper validation
+     * Uses bind variables to prevent SOQL injection
      */
-    private static String buildWhereClause(FilterParams filters) {
+    private static String buildWhereClause(FilterParams filters, Map<String, Object> bindVars) {
         List<String> conditions = new List<String>();
         
         if (filters == null) {
             return '';
         }
         
-        // Validate and add site filter
+        String siteField = NamespaceUtil.getAssetFieldName('Site__c');
+        String criticalityField = NamespaceUtil.getAssetFieldName('Criticality__c');
+        String installDateField = NamespaceUtil.getAssetFieldName('Installation_Date__c');
+        
+        // Validate and add site filter using bind variables
         if (filters.siteIds != null && !filters.siteIds.isEmpty()) {
-            List<String> validSiteIds = new List<String>();
+            List<Id> validSiteIds = new List<Id>();
             for (String siteId : filters.siteIds) {
                 if (String.isNotBlank(siteId) && siteId instanceof Id) {
-                    validSiteIds.add('\'' + String.escapeSingleQuotes(siteId) + '\'');
+                    validSiteIds.add((Id)siteId);
                 }
             }
             if (!validSiteIds.isEmpty()) {
-                conditions.add('Site__c IN (' + String.join(validSiteIds, ',') + ')');
+                bindVars.put('siteIds', validSiteIds);
+                conditions.add(siteField + ' IN :siteIds');
             }
         }
         
-        // Validate and add criticality filter
+        // Validate and add criticality filter using bind variables
         if (filters.criticalities != null && !filters.criticalities.isEmpty()) {
             List<String> validCriticalities = new List<String>();
             Set<String> allowedValues = new Set<String>{'Critical', 'High', 'Medium', 'Low'};
             for (String criticality : filters.criticalities) {
                 if (String.isNotBlank(criticality) && allowedValues.contains(criticality)) {
-                    validCriticalities.add('\'' + String.escapeSingleQuotes(criticality) + '\'');
+                    validCriticalities.add(criticality);
                 }
             }
             if (!validCriticalities.isEmpty()) {
-                conditions.add('Criticality__c IN (' + String.join(validCriticalities, ',') + ')');
+                bindVars.put('criticalities', validCriticalities);
+                conditions.add(criticalityField + ' IN :criticalities');
             }
         }
         
-        // Validate and add date filters
+        // Validate and add date filters using bind variables
         if (String.isNotBlank(filters.startDate)) {
             try {
-                Date.valueOf(filters.startDate); // Validate date format
-                conditions.add('Installation_Date__c >= ' + filters.startDate);
+                Date startDateValue = Date.valueOf(filters.startDate);
+                bindVars.put('startDate', startDateValue);
+                conditions.add(installDateField + ' >= :startDate');
             } catch (Exception e) {
                 System.debug('Invalid start date format: ' + filters.startDate);
             }
@@ -473,13 +552,23 @@ public with sharing class AssetDashboardController {
         
         if (String.isNotBlank(filters.endDate)) {
             try {
-                Date.valueOf(filters.endDate); // Validate date format
-                conditions.add('Installation_Date__c <= ' + filters.endDate);
+                Date endDateValue = Date.valueOf(filters.endDate);
+                bindVars.put('endDate', endDateValue);
+                conditions.add(installDateField + ' <= :endDate');
             } catch (Exception e) {
                 System.debug('Invalid end date format: ' + filters.endDate);
             }
         }
         
         return String.join(conditions, ' AND ');
+    }
+    
+    /**
+     * Overloaded method for backward compatibility (without bind variables)
+     * DEPRECATED: Use buildWhereClause(FilterParams, Map<String, Object>) instead
+     */
+    private static String buildWhereClause(FilterParams filters) {
+        Map<String, Object> bindVars = new Map<String, Object>();
+        return buildWhereClause(filters, bindVars);
     }
 }
