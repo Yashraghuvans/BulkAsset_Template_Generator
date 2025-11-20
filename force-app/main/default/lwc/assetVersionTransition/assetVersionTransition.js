@@ -7,8 +7,20 @@ import activatePlannedVersion from '@salesforce/apex/AssetVersionController.acti
 import supersedeVersion from '@salesforce/apex/AssetVersionController.supersedeVersion';
 import findRelatedLiveAsset from '@salesforce/apex/AssetVersionController.findRelatedLiveAsset';
 
+// Import field references for namespace compatibility
+import NAME_FIELD from '@salesforce/schema/Asset.Name';
+import VERSION_FIELD from '@salesforce/schema/Asset.Version__c';
+import VERSION_STATUS_FIELD from '@salesforce/schema/Asset.Version_Status__c';
+
 export default class AssetVersionTransition extends LightningElement {
     @api recordId;
+    
+    // Field references for namespace compatibility
+    fields = {
+        name: NAME_FIELD,
+        version: VERSION_FIELD,
+        versionStatus: VERSION_STATUS_FIELD
+    };
     
     // UI State
     isLoading = true;
